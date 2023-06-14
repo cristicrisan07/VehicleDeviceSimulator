@@ -6,8 +6,6 @@ import org.json.simple.parser.ParseException;
 import org.springframework.stereotype.Service;
 
 import javax.bluetooth.*;
-import javax.crypto.SecretKey;
-import javax.crypto.spec.SecretKeySpec;
 import javax.microedition.io.Connector;
 import javax.microedition.io.StreamConnection;
 import javax.microedition.io.StreamConnectionNotifier;
@@ -16,15 +14,17 @@ import javax.obex.HeaderSet;
 import javax.obex.Operation;
 import javax.obex.ResponseCodes;
 import java.io.*;
-import java.util.Base64;
 
 @Service
 public class VehicleLocker {
     private static Object lock=new Object();
+    private static final Object connectionLock=new Object();
     private static LocalDevice localDevice;
     private static DiscoveryAgent agent;
     private static StreamConnection connection;
+    private static boolean deviceConnected;
     private static StreamConnectionNotifier server;
+    private static DataOutputStream dos;
     private static boolean waitForConnection = true;
     private static final UUID uuid = new UUID(                              //the uid of the service, it has to be unique,
             "27012f0c68af4fbf8dbe6bbaf7aa432a", false);
@@ -38,14 +38,21 @@ public class VehicleLocker {
                 connection = server.acceptAndOpen(); // Wait until client connects
                 ////=== At this point, two devices should be connected ===//
 
-                DataOutputStream dos = connection.openDataOutputStream();
-                var messageToBeSent = "CONNECTED\n";
+                dos = connection.openDataOutputStream();
+                JSONObject messageToBeSent = new JSONObject();
+                messageToBeSent.put("connectionStatus","CONNECTED");
+                messageToBeSent.put("controllerState",StateService.getStateAsJSONString());
+
                 System.out.println("Phone connected");
-                dos.writeChars(messageToBeSent);
+                dos.writeChars(messageToBeSent.toJSONString().concat("\n"));
 
                 DataInputStream dis = connection.openDataInputStream();
-
+                synchronized(connectionLock){
+                    connectionLock.notify();
+                }
+                deviceConnected = true;
                 StringBuilder cmd = new StringBuilder();
+                System.out.println("notified");
                 try {
                     while (!cmd.toString().equals("terminate")) {
 
@@ -57,23 +64,28 @@ public class VehicleLocker {
                         var readString = cmd.toString();
                         if (!readString.equals("terminate")) {
                             try {
-                                JSONObject jsonObject = (JSONObject) new JSONParser().parse(readString);
-
-                                String remoteToken = (String) jsonObject.get("token");
-                                if (remoteToken.equals(token)) {
-                                    String operation = (String) jsonObject.get("operation");
-                                    if (operation.equals("OPEN")) {
-                                        System.out.println("Opening the doors");
-                                        dos.writeChars("DOORS OPENED\n");
-                                        dos.writeChars("terminate\n");
-
-                                    } else {
-                                        if (operation.equals("CLOSE")) {
-                                            System.out.println("Closing the doors");
-                                            dos.writeChars("DOORS CLOSED\n");
+                                if(!readString.equals("GET_STATE")) {
+                                    JSONObject jsonObject = (JSONObject) new JSONParser().parse(readString);
+                                    String remoteToken = (String) jsonObject.get("token");
+                                    if (remoteToken.equals(token)) {
+                                        String operation = (String) jsonObject.get("operation");
+                                        if (operation.equals("OPEN")) {
+                                            System.out.println("Opening the doors...");
+                                            dos.writeChars("DOORS OPENED\n");
                                             dos.writeChars("terminate\n");
+
+                                        } else {
+                                            if (operation.equals("CLOSE")) {
+                                                System.out.println("Closing the doors...");
+                                                dos.writeChars("DOORS CLOSED\n");
+                                                dos.writeChars("terminate\n");
+                                            }
                                         }
                                     }
+                                }else{
+                                    System.out.println("Sending state to phone...");
+                                    dos.writeChars(StateService.getStateAsJSONString());
+                                    dos.writeChars("terminate\n");
                                 }
                             } catch (ParseException e) {
                                 e.printStackTrace();
@@ -82,6 +94,7 @@ public class VehicleLocker {
                     }
 
                 } catch (EOFException e) {
+                    deviceConnected = false;
                     System.out.println("Remote socket closed.");
                 }
 
@@ -100,13 +113,31 @@ public class VehicleLocker {
             }
         }
         catch (InterruptedIOException e){
+            deviceConnected = false;
             System.out.println("Connection closed");
         }
         catch (Exception e) {
+            deviceConnected = false;
             e.printStackTrace();
         }
         System.out.println("Main exited");
     }
+
+//    public static void SendStatusUpdate(){
+//        try {
+//            if(!deviceConnected) {
+//                synchronized (connectionLock) {
+//                    connectionLock.wait();
+//                    dos.writeChars(StateService.getBluetoothFriendlyCurrentStateMessage());
+//                }
+//            }else{
+//                dos.writeChars(StateService.getBluetoothFriendlyCurrentStateMessage());
+//            }
+//        }
+//        catch (InterruptedException | IOException e) {
+//            e.printStackTrace();
+//        }
+//    }
 
     public static String closeConnection() throws IOException {
         if(connection == null){
@@ -115,6 +146,7 @@ public class VehicleLocker {
             connection.close();
             server.close();
             waitForConnection = false;
+            deviceConnected = false;
             return "SUCCESS";
         }
     }

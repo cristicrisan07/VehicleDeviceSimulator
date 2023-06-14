@@ -10,11 +10,10 @@ import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import java.io.IOException;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Objects;
-
-import static com.example.vehicle_device_simulator.Service.LocationService.startSendingLocationToServer;
 
 @SpringBootApplication
 public class VehicleDeviceSimulatorApplication {
@@ -23,13 +22,22 @@ public class VehicleDeviceSimulatorApplication {
 
         StateService.setVin(args[1]);
         Arrays.stream(args).toList().forEach(System.out::println);
-        String status = StateService.getState();
-        if(!Objects.equals(status,"NOT_RENTED")) {
-            try {
-                VehicleLocker.openService(status);
-                new Thread(()->LocationService.startSendingLocationToServer(StateService.getVin())).start();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+        var overallStatus = StateService.getStateFromRemote();
+        if(overallStatus!=null) {
+            String emergencyAction = overallStatus.getEmergency().getAction();
+            if(!emergencyAction.equals("NONE")) {
+                StateService.setState(emergencyAction);
+                StateService.setReason(overallStatus.getEmergency().getReason());
+                StateService.setIssueTime(LocalDateTime.parse(overallStatus.getEmergency().getTime()));
+            }
+
+            if (!Objects.equals(overallStatus.getToken(), "NOT_RENTED")) {
+                try {
+                    VehicleLocker.openService(overallStatus.getToken());
+                    new Thread(() -> LocationService.startSendingLocationToServer(StateService.getVin())).start();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
             }
         }
         SpringApplication app = new SpringApplication(VehicleDeviceSimulatorApplication.class);
